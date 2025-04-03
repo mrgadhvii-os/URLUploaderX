@@ -26,7 +26,6 @@ import json
 import subprocess
 from metadata_handler import ensure_video_metadata, format_duration
 from txt_filter import process_text_file  # Add this import
-from timer import delay_with_progress
 
 # Create downloads directory if it doesn't exist
 if not os.path.exists("downloads"):
@@ -1584,61 +1583,61 @@ async def process_txt_file(client: Client, message: Message):
                     if USER_STATES[user_id].get("canceled", False):
                         await status_msg.edit_text(
                             "❌ Batch processing cancelled!\n\n"
-                            f"📊 Progress Report:\n"
-                            f"• Total Files: {len(valid_urls)}\n"
-                            f"• Processed: {i-1}/{len(valid_urls)}\n"
-                            f"• Success: {success_count}\n"
-                            f"• Failed: {failed_count}"
+                            f"📚 Total files: {len(valid_urls)}\n"
+                            f"✅ Processed: {success_count}\n"
+                            f"❌ Failed: {failed_count}\n"
+                            f"⏹ Cancelled at: {i}/{len(valid_urls)}"
                         )
                         return
-
-                    # Process the current file
+                    
+                    # Update status with time estimate
+                    remaining_files = len(valid_urls) - i
+                    estimated_time = remaining_files * 10  # 10 seconds per file
+                    hours, remainder = divmod(estimated_time, 3600)
+                    minutes, seconds = divmod(remainder, 60)
+                    time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s" if hours > 0 else f"{int(minutes)}m {int(seconds)}s"
+                    
+                    await status_msg.edit_text(
+                        f"🔄 Processing file {i}/{len(valid_urls)}\n\n"
+                        f"✅ Successful: {success_count}\n"
+                        f"❌ Failed: {failed_count}\n"
+                        f"⏳ Progress: {(i/len(valid_urls))*100:.1f}%\n\n"
+                        f"⌛ Estimated time remaining: {time_str}\n"
+                        "💡 Server Health Mode: 10s delay between files",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_batch")]
+                        ])
+                    )
+                    
                     if await process_url_line(client, message, line, user_id):
                         success_count += 1
                     else:
                         failed_count += 1
-
-                    # Add cooldown timer before cleaning and next file (except for last file)
-                    if i < len(valid_urls):
-                        try:
-                            await status_msg.edit_text(
-                                f"✅ File {i}/{len(valid_urls)} processed successfully!\n\n"
-                                "⏳ Server cooldown in progress..."
-                            )
-                            
-                            # Add the timer with progress
-                            await delay_with_progress(
-                                status_msg,
-                                60,  # 60 seconds delay
-                                current_file=i,
-                                total_files=len(valid_urls),
-                                success_count=success_count,
-                                failed_count=failed_count
-                            )
-                            
-                            # Only clean files after timer completes
-                            clean_all_files()
-                            clean_downloads_dir()
-                            clean_logs()
-                            
-                        except Exception as e:
-                            logger.error(f"Error in cooldown: {str(e)}")
-                            # Continue processing even if timer fails
-                            continue
-                    else:
-                        # For the last file, clean up without delay
-                        clean_all_files()
-                        clean_downloads_dir()
-                        clean_logs()
-
-                # Final status after all files are processed
+                    
+                    # Clean downloads directory after each file
+                    clean_downloads_dir()
+                    
+                    # Add 10-second delay between files for server health
+                    if i < len(valid_urls):  # Don't delay after the last file
+                        logger.info("Waiting 10 seconds before next file (Server Health Mode)")
+                        await status_msg.edit_text(
+                            f"⏳ **Cooling Down...**\n\n"
+                            f"• Processed: {i}/{len(valid_urls)} files\n"
+                            f"• Waiting 10 seconds for server health\n"
+                            f"• Next file starting soon...\n\n"
+                            f"✅ Successful: {success_count}\n"
+                            f"❌ Failed: {failed_count}",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        await asyncio.sleep(10)
+                
+                # Final status
                 await status_msg.edit_text(
                     "✅ Batch processing completed!\n\n"
-                    f"📊 Final Report:\n"
-                    f"• Total Files: {len(valid_urls)}\n"
-                    f"• Success: {success_count}\n"
-                    f"• Failed: {failed_count}\n\n"
-                    "Send another file or /start for new session.",
+                    f"📚 Total files: {len(valid_urls)}\n"
+                    f"✅ Successfully processed: {success_count}\n"
+                    f"❌ Failed: {failed_count}\n\n"
+                    "Send another file or /start for a new session.",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 Start New Session", callback_data="start")]
                     ])
