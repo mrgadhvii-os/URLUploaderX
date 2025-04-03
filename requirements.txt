@@ -15,7 +15,4 @@ psutil
 requests
 beautifulsoup4
 python-magic
-<<<<<<< HEAD
 ffprobe
-=======
->>>>>>> a16b7c8acbf41831f2227edde2b72ab46345c269
