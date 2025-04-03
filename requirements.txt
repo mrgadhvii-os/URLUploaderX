@@ -1,0 +1,21 @@
+pyrogram
+tgcrypto
+yt-dlp
+ffmpeg-python
+pymongo
+pycryptodome
+python-dotenv
+aiohttp
+aiofiles
+pillow
+hachoir
+motor
+dnspython
+psutil
+requests
+beautifulsoup4
+python-magic
+<<<<<<< HEAD
+ffprobe
+=======
+>>>>>>> a16b7c8acbf41831f2227edde2b72ab46345c269
