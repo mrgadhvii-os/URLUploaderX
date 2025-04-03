@@ -119,11 +119,10 @@ class Downloader:
         self.encryption_key = None
         self.video_info = VideoInfo()
         self.event_loop = loop
-        self.update_interval = 3.0  # Increased to 3 seconds
+        self.update_interval = 1.0  # Reduced to 1 second for smoother progress
         self.last_update_time = 0
         self.last_progress = 0
-        self.min_size_update = 15 * 1024 * 1024  # 15MB minimum progress for update
-        self.last_bytes = 0
+        self.download_finished = False
         self.executor = ThreadPoolExecutor(max_workers=2)
         
         os.makedirs(download_path, exist_ok=True)
@@ -208,74 +207,79 @@ class Downloader:
                 speed = d.get("speed", 0)
                 filename = d.get("filename", "")
                 
-                # Only show start message once
                 if not self.download_started:
                     self.download_started = True
                     logger.info("⚡ DOWNLOADING")
                 
-                # Calculate progress
                 if total_bytes > 0:
-                    progress = (downloaded_bytes / total_bytes) * 100
+                    progress = min((downloaded_bytes / total_bytes) * 100, 99.9)  # Cap at 99.9%
                 else:
                     progress = 0
-
-                # Only update terminal log if:
-                # 1. At least 3 seconds have passed AND
-                # 2. At least 15MB more has been downloaded
-                current_time = time.time()
-                bytes_progress = downloaded_bytes - self.last_bytes
                 
-                if (current_time - self.last_update_time >= self.update_interval and 
-                    bytes_progress >= self.min_size_update):
-                    
+                current_time = time.time()
+                if (current_time - self.last_update_time) >= self.update_interval:
                     self.last_update_time = current_time
-                    self.last_bytes = downloaded_bytes
+                    self.last_progress = progress
                     
                     # Minimal terminal log
                     logger.info(f"⬇️ {progress:.1f}%")
                     
-                # Always call progress callback for Telegram updates
-                if self.progress_callback:
-                    try:
-                        coro = self.progress_callback(
-                            progress, speed, total_bytes, downloaded_bytes, 
-                            d.get("eta", None), filename
-                        )
-                        if self.event_loop and self.event_loop.is_running():
-                            asyncio.run_coroutine_threadsafe(coro, self.event_loop)
-                        else:
-                            asyncio.run(coro)
-                    except Exception:
-                        pass
-            
-            elif status == "finished":
-                logger.info("✅ COMPLETE")
-                
-                # Update video info silently
-                if "info_dict" in d:
-                    info = d["info_dict"]
-                    self.video_info.title = info.get("title", "")
-                    self.video_info.format = info.get("format", "")
-                    
-                    if "thumbnail" in info and info["thumbnail"]:
+                    # Always call progress callback for UI updates
+                    if self.progress_callback:
                         try:
-                            thumbnail_path = os.path.join(
-                                self.download_path, 
-                                f"{os.path.basename(d.get('filename', 'video'))}_thumb.jpg"
+                            coro = self.progress_callback(
+                                progress, speed, total_bytes, downloaded_bytes, 
+                                d.get("eta", None), filename
                             )
-                            ydl_opts = {
-                                "quiet": True,
-                                "no_warnings": True,
-                                "outtmpl": thumbnail_path,
-                            }
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                ydl.download([info["thumbnail"]])
-                            
-                            if os.path.exists(thumbnail_path):
-                                self.video_info.thumbnail = thumbnail_path
+                            if self.event_loop and self.event_loop.is_running():
+                                future = asyncio.run_coroutine_threadsafe(coro, self.event_loop)
+                                future.result(timeout=1)  # 1 second timeout
+                            else:
+                                asyncio.run(coro)
                         except Exception:
                             pass
-        
+            
+            elif status == "finished":
+                if not self.download_finished:  # Prevent multiple finish notifications
+                    self.download_finished = True
+                    logger.info("✅ Download Complete")
+                    
+                    # Final progress update
+                    if self.progress_callback:
+                        try:
+                            coro = self.progress_callback(100, 0, total_bytes, total_bytes, 0, filename)
+                            if self.event_loop and self.event_loop.is_running():
+                                future = asyncio.run_coroutine_threadsafe(coro, self.event_loop)
+                                future.result(timeout=1)
+                            else:
+                                asyncio.run(coro)
+                        except Exception:
+                            pass
+                    
+                    # Update video info silently
+                    if "info_dict" in d:
+                        info = d["info_dict"]
+                        self.video_info.title = info.get("title", "")
+                        self.video_info.format = info.get("format", "")
+                        
+                        if "thumbnail" in info and info["thumbnail"]:
+                            try:
+                                thumbnail_path = os.path.join(
+                                    self.download_path, 
+                                    f"{os.path.basename(d.get('filename', 'video'))}_thumb.jpg"
+                                )
+                                ydl_opts = {
+                                    "quiet": True,
+                                    "no_warnings": True,
+                                    "outtmpl": thumbnail_path,
+                                }
+                                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                    ydl.download([info["thumbnail"]])
+                                
+                                if os.path.exists(thumbnail_path):
+                                    self.video_info.thumbnail = thumbnail_path
+                            except Exception:
+                                pass
         except Exception:
             pass
 
@@ -443,88 +447,83 @@ class Downloader:
         return filepath
 
     async def _download_with_ytdlp(self) -> Tuple[bool, str]:
-        """Run yt-dlp download in a separate thread to avoid blocking"""
-        logger.info(f"Starting yt-dlp download for {self.url}")
+        """Run yt-dlp download in a separate thread"""
+        logger.info(f"Starting download: {self.url}")
         
         try:
-            # Send initial progress update
-            if self.progress_callback and not self.download_started:
-                await self.send_initial_progress()
-            
-            # Set up yt-dlp options
             outtmpl = os.path.join(self.download_path, "%(title).100s.%(ext)s")
             
             ydl_opts = {
-                "quiet": False,
-                "no_warnings": False,
+                "quiet": True,
+                "no_warnings": True,
                 "progress_hooks": [self.progress_hook],
                 "outtmpl": outtmpl,
                 "format": "best/bestvideo+bestaudio",
-                "writeinfojson": True,
-                "retries": 10,
-                "fragment_retries": 10,
-                "concurrent_fragment_downloads": 32,  # Increased to 32 for more parallel downloads
-                "buffersize": 8388608,  # 8MB buffer size
-                "http_chunk_size": 33554432,  # 32MB chunks for faster downloads
-                "throttledratelimit": 1000000000,  # 1GB/s limit
-                "external_downloader": "aria2c",  # Use aria2c for faster downloads
+                "retries": 3,
+                "fragment_retries": 3,
+                "retry_sleep": lambda n: 3,  # Fixed retry delay
+                "concurrent_fragment_downloads": 16,  # Good balance for high-speed
+                "buffersize": 16777216,  # 16MB buffer
+                "http_chunk_size": 16777216,  # 16MB chunks
+                "throttledratelimit": None,  # Remove speed limit completely
+                "external_downloader": "aria2c",
                 "external_downloader_args": [
-                    "-x", "32",  # 32 connections per server
-                    "-s", "32",  # Split file into 32 parts
-                    "-k", "32M",  # Min split size 32MB
-                    "--max-connection-per-server=32",
-                    "--min-split-size=32M",
-                    "--max-concurrent-downloads=32",
-                    "--max-overall-download-limit=0",
-                    "--max-download-limit=0",
-                    "--file-allocation=none",
+                    "-x", "16",  # 16 connections
+                    "-s", "16",  # 16 splits
+                    "-k", "16M",  # 16MB min split
+                    "--max-connection-per-server=16",
+                    "--min-split-size=16M",
+                    "--max-concurrent-downloads=16",
+                    "--max-overall-download-limit=0",  # No speed limit
+                    "--max-download-limit=0",  # No speed limit
+                    "--disk-cache=64M",
                     "--optimize-concurrent-downloads=true",
+                    "--async-dns=true",
+                    "--enable-http-pipelining=true",
+                    "--file-allocation=none",
+                    "--download-result=hide",
+                    "--summary-interval=0",
+                    "--stream-piece-selector=geom",  # Better piece selection for high speed
                     "--enable-http-keep-alive=true",
                     "--http-accept-gzip=true",
-                    "--disk-cache=64M",
-                    "--async-dns=true",
-                    "--allow-overwrite=true",
-                    "--auto-file-renaming=false"
+                    "--uri-selector=adaptive"  # Better URI selection for high speed
                 ],
-                "geo_bypass": True,
+                "socket_timeout": 15,  # Increased timeout for high-speed transfers
                 "no_check_certificate": True,
-                "ignoreerrors": False,
-                "nooverwrites": False,
                 "continuedl": True,
             }
             
-            # Function to run in the thread pool
             def run_download():
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(self.url, download=True)
-                        
-                        # Get the actual filename that was downloaded
                         if info:
                             filename = ydl.prepare_filename(info)
-                            
-                            # If info_dict has resolution, update video_info
                             self.video_info.width = info.get("width", 0)
                             self.video_info.height = info.get("height", 0)
                             self.video_info.duration = info.get("duration", 0)
                             self.video_info.title = info.get("title", "")
                             
-                            # Check if thumbnail info exists
-                            if "thumbnail" in info and info["thumbnail"]:
-                                self.video_info.thumbnail = info.get("thumbnail", "")
-                            
-                            return True, filename
+                            # Verify file exists and is not empty
+                            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                                return True, filename
+                            else:
+                                return False, "Downloaded file is empty or missing"
                         return False, "Could not extract video info"
                 except Exception as e:
-                    logger.error(f"yt-dlp download error: {e}")
-                    logger.error(traceback.format_exc())
+                    logger.error(f"Download error: {str(e)}")
                     return False, str(e)
             
-            # Run the download in a separate thread
-            result = await loop.run_in_executor(self.executor, run_download)
+            # Run download with timeout
+            result = await asyncio.wait_for(
+                loop.run_in_executor(self.executor, run_download),
+                timeout=3600  # 1 hour timeout
+            )
             return result
-        
+            
+        except asyncio.TimeoutError:
+            logger.error("Download timed out after 1 hour")
+            return False, "Download timed out"
         except Exception as e:
-            logger.error(f"Error setting up yt-dlp download: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Download setup error: {str(e)}")
             return False, str(e) 
