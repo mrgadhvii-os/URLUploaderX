@@ -678,22 +678,22 @@ async def handle_messages(client: Client, message: Message):
             last_upload_update_time = time.time()
             update_interval = 1  # seconds between updates
 
-            # Progress callback for upload with rate limiting
+            # Upload progress callback
+            last_upload_update_time = time.time()
+            update_interval = 1  # seconds
+            
             async def upload_progress(current, total):
                 nonlocal last_upload_update_time
+                
                 current_time = time.time()
-
-                # Throttle updates to avoid Telegram's rate limits
                 if (current_time - last_upload_update_time) < update_interval:
                     return
-
+                
                 last_upload_update_time = current_time
-
+                
                 try:
                     # Check if user has canceled
-                    if user_id not in USER_STATES or USER_STATES[user_id].get(
-                        "canceled", False
-                    ):
+                    if user_id not in USER_STATES or USER_STATES[user_id].get("canceled", False):
                         return
 
                     progress = (current / total) * 100
@@ -707,9 +707,13 @@ async def handle_messages(client: Client, message: Message):
                         "╰━━━━━━━━━━━━━━━➣"
                     )
                     await status_message.edit_text(status_text)
-                    logger.info(f"Upload progress for user {user_id}: {progress:.1f}%")
+                    
+                    # Minimal terminal log
+                    if current_time - last_upload_update_time >= 3.0:  # Log every 3 seconds
+                        logger.info(f"⬆️ {progress:.1f}%")
+                    
                 except Exception as e:
-                    logger.error(f"Upload progress error: {e}")
+                    pass  # Suppress upload progress errors
 
             # Get custom thumbnail if exists, otherwise use video thumbnail
             thumbnail_path = USER_THUMBNAILS.get(user_id)
@@ -1252,18 +1256,22 @@ async def process_url_line(client: Client, message: Message, line: str, user_id:
         
         # Upload progress callback
         last_upload_update_time = time.time()
-        update_interval = 1
+        update_interval = 1  # seconds
         
         async def upload_progress(current, total):
             nonlocal last_upload_update_time
-            current_time = time.time()
             
+            current_time = time.time()
             if (current_time - last_upload_update_time) < update_interval:
                 return
-                
+            
             last_upload_update_time = current_time
             
             try:
+                # Check if user has canceled
+                if user_id not in USER_STATES or USER_STATES[user_id].get("canceled", False):
+                    return
+
                 progress = (current / total) * 100
                 progress_bar = create_progress_bar(progress)
                 status_text = (
@@ -1275,10 +1283,14 @@ async def process_url_line(client: Client, message: Message, line: str, user_id:
                     "╰━━━━━━━━━━━━━━━➣"
                 )
                 await status_message.edit_text(status_text)
-                logger.info(f"Upload progress: {progress:.1f}%")
+                
+                # Minimal terminal log
+                if current_time - last_upload_update_time >= 3.0:  # Log every 3 seconds
+                    logger.info(f"⬆️ {progress:.1f}%")
+                
             except Exception as e:
-                logger.error(f"Upload progress error: {e}")
-        
+                pass  # Suppress upload progress errors
+
         try:
             # Get custom thumbnail if exists
             thumbnail_path = USER_THUMBNAILS.get(user_id)
