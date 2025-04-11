@@ -25,7 +25,132 @@ import glob
 import json
 import subprocess
 from metadata_handler import ensure_video_metadata, format_duration
-from txt_filter import process_text_file  # Add this import
+from txt_filter import process_text_file
+from health import health_manager  # Import the health manager
+
+# Set up logger
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("log.txt"), logging.StreamHandler()],
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# Define client
+app = Client(
+    "URL-Uploader",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+)
+
+# User states
+USER_STATES = {}
+update_locks = {}
+
+# Health command handler - moved to beginning
+@app.on_message(filters.command("health") & filters.private)
+async def health_command(client: Client, message: Message):
+    """Command to control server health management settings"""
+    try:
+        user_id = message.from_user.id
+        
+        # Only admins can change health settings
+        if user_id not in AUTH_USERS:
+            await message.reply_text("⚠️ You are not authorized to use this command.")
+            return
+        
+        # Log that health command was triggered
+        logger.info(f"Health command triggered by user {user_id}")
+        
+        # Parse command arguments
+        command_parts = message.text.split()
+        
+        # /health with no arguments shows current settings
+        if len(command_parts) == 1:
+            status = "✅ ENABLED" if health_manager.is_enabled else "❌ DISABLED"
+            await message.reply_text(
+                f"⚙️ **Server Health Management**\n\n"
+                f"• Status: {status}\n"
+                f"• Cooldown: {health_manager.default_cooldown} seconds\n"
+                f"• Upload Limit: {health_manager.uploads_per_hour_limit} uploads/hour\n\n"
+                "**Available Commands:**\n"
+                "• `/health on` - Enable health management\n"
+                "• `/health off` - Disable health management\n"
+                "• `/health cooldown <seconds>` - Set cooldown time\n"
+                "• `/health limit <number>` - Set hourly upload limit",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # Handle different arguments
+        action = command_parts[1].lower()
+        
+        if action == "on":
+            health_manager.enable()
+            await message.reply_text(
+                "✅ Server Health Management has been **ENABLED**.\n\n"
+                f"Cooldown between files: {health_manager.default_cooldown} seconds",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        elif action == "off":
+            health_manager.disable()
+            await message.reply_text(
+                "⚠️ Server Health Management has been **DISABLED**.\n\n"
+                "Warning: This may cause server overload during batch processing.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        elif action == "cooldown" and len(command_parts) >= 3:
+            try:
+                seconds = int(command_parts[2])
+                if seconds < 0:
+                    raise ValueError("Cooldown time must be positive")
+                    
+                health_manager.set_cooldown(seconds)
+                await message.reply_text(
+                    f"✅ Cooldown time set to **{seconds} seconds**.\n\n"
+                    f"This will be applied to new batch processes.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except ValueError:
+                await message.reply_text(
+                    "❌ Invalid value. Please provide a positive number for cooldown seconds.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        
+        elif action == "limit" and len(command_parts) >= 3:
+            try:
+                limit = int(command_parts[2])
+                if limit < 1:
+                    raise ValueError("Upload limit must be at least 1")
+                    
+                health_manager.uploads_per_hour_limit = limit
+                await message.reply_text(
+                    f"✅ Upload limit set to **{limit} uploads per hour**.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except ValueError:
+                await message.reply_text(
+                    "❌ Invalid value. Please provide a positive number for upload limit.",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        
+        else:
+            await message.reply_text(
+                "❌ Invalid command format.\n\n"
+                "**Available Commands:**\n"
+                "• `/health on` - Enable health management\n"
+                "• `/health off` - Disable health management\n"
+                "• `/health cooldown <seconds>` - Set cooldown time\n"
+                "• `/health limit <number>` - Set hourly upload limit",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    except Exception as e:
+        logger.error(f"Error in health command: {str(e)}")
+        logger.error(traceback.format_exc())
+        await message.reply_text(f"❌ An error occurred: {str(e)}")
 
 # Create downloads directory if it doesn't exist
 if not os.path.exists("downloads"):
@@ -1568,14 +1693,14 @@ async def process_txt_file(client: Client, message: Message):
                 if user_id not in update_locks:
                     update_locks[user_id] = threading.Lock()
                 
-                # Show batch processing status
+                # Show batch processing status with server health mode notice
                 await status_msg.edit_text(
                     "🔄 Starting batch download...\n\n"
                     f"📚 Total valid URLs: {len(valid_urls)}\n"
                     f"⚠️ Invalid URLs: {len(invalid_urls)}\n\n"
                     "**Processing will start in 3 seconds...**\n\n"
-                    "⚡ **Server Health Mode:**\n"
-                    "• 10 second delay between files\n"
+                    "⚡ **SERVER HEALTH MODE:**\n"
+                    "• **60-second delay** between files\n"
                     "• Helps prevent server overload\n"
                     "• Ensures stable processing",
                     parse_mode=ParseMode.MARKDOWN,
@@ -1602,26 +1727,25 @@ async def process_txt_file(client: Client, message: Message):
                         )
                         return
                     
-                    # Update status with time estimate
-                    remaining_files = len(valid_urls) - i
-                    estimated_time = remaining_files * 10  # 10 seconds per file
-                    hours, remainder = divmod(estimated_time, 3600)
-                    minutes, seconds = divmod(remainder, 60)
-                    time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s" if hours > 0 else f"{int(minutes)}m {int(seconds)}s"
-                    
-                    await status_msg.edit_text(
+                    # Update status with progress
+                    progress_text = (
                         f"🔄 Processing file {i}/{len(valid_urls)}\n\n"
                         f"✅ Successful: {success_count}\n"
                         f"❌ Failed: {failed_count}\n"
                         f"⏳ Progress: {(i/len(valid_urls))*100:.1f}%\n\n"
-                        f"⌛ Estimated time remaining: {time_str}\n"
-                        "💡 Server Health Mode: 10s delay between files",
+                        f"🔄 Server Health Mode: Active"
+                    )
+                    
+                    await status_msg.edit_text(
+                        progress_text,
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_batch")]
                         ])
                     )
                     
-                    if await process_url_line(client, message, line, user_id):
+                    # Process current URL
+                    result = await process_url_line(client, message, line, user_id)
+                    if result:
                         success_count += 1
                     else:
                         failed_count += 1
@@ -1629,19 +1753,26 @@ async def process_txt_file(client: Client, message: Message):
                     # Clean downloads directory after each file
                     clean_downloads_dir()
                     
-                    # Add 10-second delay between files for server health
+                    # Add cooldown between files (60 seconds)
                     if i < len(valid_urls):  # Don't delay after the last file
-                        logger.info("Waiting 10 seconds before next file (Server Health Mode)")
-                        await status_msg.edit_text(
-                            f"⏳ **Cooling Down...**\n\n"
+                        # Show cooling down message
+                        cooldown_time = 60  # 60 seconds cooldown
+                        cooldown_msg = await message.reply_text(
+                            f"⏳ **SERVER COOLING DOWN**\n\n"
                             f"• Processed: {i}/{len(valid_urls)} files\n"
-                            f"• Waiting 10 seconds for server health\n"
-                            f"• Next file starting soon...\n\n"
-                            f"✅ Successful: {success_count}\n"
-                            f"❌ Failed: {failed_count}",
-                            parse_mode=ParseMode.MARKDOWN
+                            f"• Waiting 60 seconds before next file\n"
+                            f"• Progress: {(i/len(valid_urls))*100:.1f}%\n\n"
+                            f"This helps prevent server overload."
                         )
-                        await asyncio.sleep(10)
+                        
+                        # Wait for cooldown period
+                        await asyncio.sleep(cooldown_time)
+                        
+                        # Delete cooldown message
+                        try:
+                            await cooldown_msg.delete()
+                        except Exception:
+                            pass
                 
                 # Final status
                 await status_msg.edit_text(
@@ -2552,7 +2683,31 @@ async def filter_text_file(client: Client, message: Message):
     except Exception as e:
         await message.reply_text(f"❌ An error occurred: {str(e)}")
 
+# Health command has been moved to the beginning of the file
+# Do not remove this comment - it helps maintain proper spacing
+
 # Start the bot
 if __name__ == "__main__":
-    logger.info("Starting URL Uploader Bot...")
-    app.run()
+    try:
+        clean_logs()
+        # Log available commands
+        logger.info("Starting bot with the following commands:")
+        logger.info(" - /start - Start the bot")
+        logger.info(" - /auth - Authorize a user")
+        logger.info(" - /unauth - Unauthorize a user")
+        logger.info(" - /listauth - List authorized users")
+        logger.info(" - /help - Show help")
+        logger.info(" - /txt - Process text file with URLs")
+        logger.info(" - /filter - Fix and format text files")
+        logger.info(" - /health - Manage server health settings")
+        logger.info(" - /stop - Stop current process")
+        logger.info(" - /delthumbnail - Delete custom thumbnail")
+        
+        # Print health status
+        logger.info(f"Server Health Management: {'Enabled' if health_manager.is_enabled else 'Disabled'}")
+        logger.info(f"Default cooldown: {health_manager.default_cooldown} seconds")
+        
+        app.run()
+    except Exception as e:
+        logger.error(f"Error starting bot: {e}")
+        logger.error(traceback.format_exc())
